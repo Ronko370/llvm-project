@@ -14,6 +14,7 @@ add_clang_library(clangTidyUtils
   HeaderGuard.cpp
   IncludeInserter.cpp
   IncludeSorter.cpp
+  JsonUtils.cpp
   LexerUtils.cpp
   NamespaceAliaser.cpp
   OptionsUtils.cpp

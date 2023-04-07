@@ -17,10 +17,12 @@
 
 #include "../utils/ExprSequence.h"
 #include "../utils/Matchers.h"
+#include "../utils/JsonUtils.h"
 #include <optional>
 
 using namespace clang::ast_matchers;
 using namespace clang::tidy::utils;
+using namespace llvm::json;
 
 namespace clang::tidy::bugprone {
 
@@ -364,9 +366,10 @@ static void emitDiagnostic(const Expr *MovingCall, const DeclRefExpr *MoveArg,
                            ASTContext *Context) {
   SourceLocation UseLoc = Use.DeclRef->getExprLoc();
   SourceLocation MoveLoc = MovingCall->getExprLoc();
+  const auto DeclName = MoveArg->getDecl()->getName();
 
   Check->diag(UseLoc, "'%0' used after it was moved")
-      << MoveArg->getDecl()->getName();
+      << DeclName;
   Check->diag(MoveLoc, "move occurred here", DiagnosticIDs::Note);
   if (Use.EvaluationOrderUndefined) {
     Check->diag(UseLoc,
@@ -378,17 +381,28 @@ static void emitDiagnostic(const Expr *MovingCall, const DeclRefExpr *MoveArg,
                 "the use happens in a later loop iteration than the move",
                 DiagnosticIDs::Note);
   }
+
+  const std::string FileName = "some_file.txt";
+  const SourceManager& SM = Context->getSourceManager();
+  FileManager& Manager = SM.getFileManager();
+  Object* Obj = readJSONFromFile(Manager, FileName);
+  const std::string VarID =
+    (DeclName + "_" +
+      std::to_string(SM.getSpellingLineNumber(MoveArg->getDecl()->getLocation()))).str();
+
+  (*(*Obj->try_emplace(VarID, Object({})).first)
+    .getSecond().getAsObject()
+    ->try_emplace("useAfterMove", Array({})).first)
+    .getSecond().getAsArray()->push_back(Array({
+      Object{Object::KV{"rowCount_use", SM.getSpellingLineNumber(UseLoc)}},
+      Object{Object::KV{"rowCount_move", SM.getSpellingLineNumber(MoveLoc)}}}));
+
+  writeJSONToFile(Manager, Obj, FileName);
 }
 
 void UseAfterMoveCheck::registerMatchers(MatchFinder *Finder) {
-  // try_emplace is a common maybe-moving function that returns a
-  // bool to tell callers whether it moved. Ignore std::move inside
-  // try_emplace to avoid false positives as we don't track uses of
-  // the bool.
-  auto TryEmplaceMatcher =
-      cxxMemberCallExpr(callee(cxxMethodDecl(hasName("try_emplace"))));
-  auto CallMoveMatcher =
-      callExpr(argumentCountIs(1), callee(functionDecl(hasName("::std::move"))),
+  auto CallMoveM atcher =
+      callExpr(callee(functionDecl(hasName("::std::move"))), argumentCountIs(1),
                hasArgument(0, declRefExpr().bind("arg")),
                unless(inDecltypeOrTemplateArg()),
                unless(hasParent(TryEmplaceMatcher)), expr().bind("call-move"),
