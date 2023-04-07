@@ -128,6 +128,7 @@ def get_tidy_invocation(f, clang_tidy_binary, checks, tmpdir, build_path,
       start.append('-config=' + config)
   for plugin in plugins:
       start.append('-load=' + plugin)
+  start.append('-system-headers')
   start.append(f)
   return start
 

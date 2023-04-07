@@ -17,10 +17,12 @@
 
 #include "../utils/ExprSequence.h"
 #include "../utils/Matchers.h"
+#include "../utils/JsonUtils.h"
 #include <optional>
 
 using namespace clang::ast_matchers;
 using namespace clang::tidy::utils;
+using namespace llvm::json;
 
 namespace clang::tidy::bugprone {
 
@@ -365,19 +367,72 @@ static void emitDiagnostic(const Expr *MovingCall, const DeclRefExpr *MoveArg,
   SourceLocation UseLoc = Use.DeclRef->getExprLoc();
   SourceLocation MoveLoc = MovingCall->getExprLoc();
 
+  auto VarDecl = MoveArg->getDecl();
+  const auto DeclName = VarDecl->getName();
+
   Check->diag(UseLoc, "'%0' used after it was moved")
-      << MoveArg->getDecl()->getName();
+      << DeclName;
   Check->diag(MoveLoc, "move occurred here", DiagnosticIDs::Note);
+  
+  std::string Diagnostic = DeclName.str() + " used after it was moved";
+  
   if (Use.EvaluationOrderUndefined) {
     Check->diag(UseLoc,
                 "the use and move are unsequenced, i.e. there is no guarantee "
                 "about the order in which they are evaluated",
                 DiagnosticIDs::Note);
+    Diagnostic += ". The use and move are unsequenced, i.e. there is no guarantee "
+            "about the order in which they are evaluated";
   } else if (UseLoc < MoveLoc || Use.DeclRef == MoveArg) {
     Check->diag(UseLoc,
                 "the use happens in a later loop iteration than the move",
                 DiagnosticIDs::Note);
+    Diagnostic += ". The use happens in a later loop iteration than the move";
   }
+  
+  const SourceManager& SM = Context->getSourceManager();
+  const auto FileID = SM.getMainFileID();
+  const std::string FileName = "move_stats/"
+    + SM.getFileEntryForID(FileID)->getName().str() + ".json";
+  llvm::Regex regex(".*/");
+  llvm::SmallVector<llvm::StringRef, 1> matches;
+  regex.match(FileName, &matches);
+  llvm::sys::fs::create_directories(matches[0]);
+
+  auto UseRange = Use.DeclRef->getSourceRange();
+  auto MoveRange = MovingCall->getSourceRange();
+
+  FileManager& Manager = SM.getFileManager();
+  auto VarDeclPath = SM.getFileEntryForID(FullSourceLoc(VarDecl->getSourceRange().getBegin(), SM).getFileID())->getName().str();
+  Object* Obj = readJSONFromFile(Manager, FileName);
+  const std::string VarID =
+    (DeclName + "|"
+        + std::to_string(SM.getSpellingLineNumber(VarDecl->getSourceRange().getBegin()))
+        + "_"
+        + std::to_string(SM.getPresumedColumnNumber(VarDecl->getSourceRange().getBegin()))
+        + "-"
+        + std::to_string(SM.getPresumedColumnNumber(VarDecl->getSourceRange().getEnd()))).str();
+
+  (*(*Obj->try_emplace(VarID, Object({})).first)
+    .getSecond().getAsObject()
+    ->try_emplace("useAfterMove", Array({})).first)
+    .getSecond().getAsArray()->push_back(Array({
+      Object{Object::KV{"use", 
+        std::to_string(SM.getSpellingLineNumber(UseRange.getBegin()))
+        + "_"
+        + std::to_string(SM.getPresumedColumnNumber(UseRange.getBegin()))
+        + "-"
+        + std::to_string(SM.getPresumedColumnNumber(UseRange.getEnd()))}},
+      Object{Object::KV{"move",
+        std::to_string(SM.getSpellingLineNumber(MoveRange.getBegin()))
+        + "_"
+        + std::to_string(SM.getPresumedColumnNumber(MoveRange.getBegin()))
+        + "-"
+        + std::to_string(SM.getPresumedColumnNumber(MoveRange.getEnd()))}},
+      Object{Object::KV{"path", VarDeclPath}},
+      Object{Object::KV{"reasoning", Diagnostic}}}));
+
+  writeJSONToFile(Manager, Obj, FileName);
 }
 
 void UseAfterMoveCheck::registerMatchers(MatchFinder *Finder) {
